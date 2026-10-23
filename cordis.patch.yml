@@ -1,0 +1,21 @@
+# 注册余额面板插件。
+#
+# Host 侧：读 DSH 已配置的模型供应商，按供应商选择的「余额查询方式」调各家
+# 官方接口，把结果聚合到 /api/dsh-balance-panel/summary。
+# Client 侧：菜单栏入口 + 右侧抽屉。
+#
+# 所有配置项都有内置默认值，这里不写 config，以免覆盖你在 profile 的
+# cordis.patch.yml 里的设置（同 id 的 override 会替换整个 config）。
+#
+# 需要调整时，在你的 profile cordis.patch.yml 里加一条同 id 的 override：
+#
+#   - id: balance-panel
+#     config:
+#       cacheMs: 30000         # 服务端结果缓存，毫秒
+#       timeoutMs: 10000       # 单次查询超时
+#       vendors:               # 按供应商名覆盖「余额查询方式」
+#         glm: zai-coding
+#         kimi: kimi-coding
+- insert:
+    - id: balance-panel
+      name: dsh-balance-panel
