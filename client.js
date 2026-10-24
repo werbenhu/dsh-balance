@@ -701,7 +701,6 @@ window.__ModuleLoader__.load({
 
       return h('div', { style: styles.proxyBox },
         h('div', { style: styles.proxyTitle }, t('proxy.settingsTitle')),
-        h('div', { style: styles.proxyIntro }, t('proxy.intro')),
         h('div', { style: styles.authRow },
           h('input', {
             value: url,
@@ -852,7 +851,6 @@ window.__ModuleLoader__.load({
           'proxy.proxy': '走代理',
           'proxy.needUrl': '先在「设置 → 余额」填写代理地址',
           'proxy.settingsTitle': '代理设置',
-          'proxy.intro': '代理地址统一在这里填。每家供应商是否走代理，在「模型」页对应卡片里选，模型请求和余额查询都按这个走。',
           'proxy.urlPlaceholder': 'http://127.0.0.1:7897',
           'proxy.save': '保存代理',
           'proxy.saved': '已保存，立即生效',
@@ -904,7 +902,6 @@ window.__ModuleLoader__.load({
           'proxy.proxy': 'Use proxy',
           'proxy.needUrl': 'Set the proxy URL under Settings → Balance first',
           'proxy.settingsTitle': 'Proxy',
-          'proxy.intro': 'Set the proxy URL here. Choose per provider whether to use it under Settings → Models; model calls and balance queries follow that choice.',
           'proxy.urlPlaceholder': 'http://127.0.0.1:7897',
           'proxy.save': 'Save proxy',
           'proxy.saved': 'Saved — effective immediately',
@@ -1358,7 +1355,6 @@ window.__ModuleLoader__.load({
         maxWidth: 720,
       },
       proxyTitle: { fontSize: 13, fontWeight: 600 },
-      proxyIntro: { fontSize: 12, opacity: 0.66, lineHeight: 1.7 },
       input: {
         flex: '1 1 260px',
         background: 'transparent',
