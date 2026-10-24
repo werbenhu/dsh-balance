@@ -17,7 +17,13 @@ jobs:
         node-version: [22, 24]
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-      - run: npm test
+          cache: pnpm
+      # 插件有运行期依赖（undici，用于按供应商的代理路由），必须先装依赖再跑测试
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
