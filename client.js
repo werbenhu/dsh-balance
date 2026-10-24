@@ -44,6 +44,7 @@ window.__ModuleLoader__.load({
     const XAI_LOGIN_ROUTE = '/api/dsh-balance-panel/xai/login'
     const XAI_LOGOUT_ROUTE = '/api/dsh-balance-panel/xai/logout'
     const XAI_CANCEL_ROUTE = '/api/dsh-balance-panel/xai/cancel'
+    const PROXY_ROUTE = '/api/dsh-balance-panel/proxy'
 
     /** 查询方式目录只需取一次：模块级缓存，多个组件共用。 */
     let vendorsCache
@@ -564,6 +565,7 @@ window.__ModuleLoader__.load({
     function BalanceSettings({ t }) {
       return h('div', { style: styles.settings },
         h('div', { style: styles.settingsIntro }, t('settings.intro')),
+        h(ProxySettings, { t }),
         h(BalanceList, { t, compact: false, showHeader: true }),
       )
     }
@@ -599,6 +601,125 @@ window.__ModuleLoader__.load({
       } catch {
         // 写失败不弹窗：下次打开页面会以服务端为准
       }
+    }
+
+    /** 代理设置缓存：模型页多个卡片共用，写操作后失效。 */
+    let proxyCache
+
+    async function loadProxy() {
+      if (proxyCache !== undefined && Date.now() - proxyCache.at < 5_000) return proxyCache.value
+      try {
+        const response = await fetch(PROXY_ROUTE, { headers: { accept: 'application/json' } })
+        const payload = response.ok ? await response.json() : {}
+        const value = {
+          url: typeof payload.proxy?.url === 'string' ? payload.proxy.url : '',
+          providers: payload.proxy?.providers !== null && typeof payload.proxy?.providers === 'object' ? payload.proxy.providers : {},
+        }
+        proxyCache = { at: Date.now(), value }
+        return value
+      } catch {
+        const value = { url: '', providers: {} }
+        proxyCache = { at: Date.now(), value }
+        return value
+      }
+    }
+
+    /** 模型页每个供应商卡片里的「代理」选择：跟随默认 / 直连 / 走代理。 */
+    function ProxyPicker({ t, providerId, compact }) {
+      const [mode, setMode] = useState('default')
+      const [needsUrl, setNeedsUrl] = useState(false)
+
+      useEffect(() => {
+        let alive = true
+        loadProxy().then((proxy) => {
+          if (!alive) return
+          const current = proxy.providers[providerId] ?? 'default'
+          setMode(current)
+          setNeedsUrl(current === 'proxy' && proxy.url === '')
+        })
+        return () => {
+          alive = false
+        }
+      }, [providerId])
+
+      const onChange = (next) => {
+        setMode(next)
+        setNeedsUrl(next === 'proxy' && (proxyCache?.value.url ?? '') === '')
+        proxyCache = undefined
+        fetch(PROXY_ROUTE, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ provider: providerId, mode: next }),
+        }).catch(() => {})
+      }
+
+      return h('div', { style: compact ? styles.modelRow : styles.modelBlock },
+        h('span', { style: styles.modelLabel }, t('proxy.label')),
+        h('select', {
+          value: mode,
+          title: t('proxy.title'),
+          style: styles.select,
+          onChange: (event) => onChange(event.target.value),
+        },
+          h('option', { value: 'default' }, t('proxy.default')),
+          h('option', { value: 'direct' }, t('proxy.direct')),
+          h('option', { value: 'proxy' }, t('proxy.proxy')),
+        ),
+        needsUrl ? h('span', { style: styles.modelHint }, t('proxy.needUrl')) : null,
+      )
+    }
+
+    /** 设置 → 余额顶部的代理地址卡片；每家供应商的出口在模型页卡片里选。 */
+    function ProxySettings({ t }) {
+      const [url, setUrl] = useState('')
+      const [loaded, setLoaded] = useState(false)
+      const [state, setState] = useState('')
+
+      useEffect(() => {
+        loadProxy().then((proxy) => {
+          setUrl(proxy.url)
+          setLoaded(true)
+        })
+      }, [])
+
+      const save = async () => {
+        try {
+          const response = await fetch(PROXY_ROUTE, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ url }),
+          })
+          const payload = await response.json()
+          if (!response.ok) throw new Error(payload.error ?? `HTTP ${response.status}`)
+          setUrl(payload.proxy?.url ?? url)
+          proxyCache = undefined
+          setState('saved')
+        } catch {
+          setState('error')
+        }
+      }
+
+      return h('div', { style: styles.proxyBox },
+        h('div', { style: styles.proxyTitle }, t('proxy.settingsTitle')),
+        h('div', { style: styles.proxyIntro }, t('proxy.intro')),
+        h('div', { style: styles.authRow },
+          h('input', {
+            value: url,
+            placeholder: t('proxy.urlPlaceholder'),
+            style: styles.input,
+            onChange: (event) => {
+              setUrl(event.target.value)
+              setState('')
+            },
+            onKeyDown: (event) => {
+              if (event.key === 'Enter') void save()
+            },
+          }),
+          h('button', { type: 'button', style: styles.button, disabled: !loaded, onClick: () => { void save() } }, t('proxy.save')),
+          state === 'saved' ? h('span', { style: styles.hint }, t('proxy.saved')) : null,
+          state === 'error' ? h('span', { style: { ...styles.hint, color: TONE.bad } }, t('proxy.invalid')) : null,
+        ),
+      )
     }
 
     /** 一个下拉 + 一行说明，塞进供应商卡片内部。 */
@@ -724,6 +845,18 @@ window.__ModuleLoader__.load({
           'xai.loggedIn': '已连接 xAI 订阅',
           'xai.loginFailed': '登录失败：{0}',
           'xai.authError': 'xAI 状态读取失败：{0}',
+          'proxy.label': '网络代理',
+          'proxy.title': '这个供应商的网络出口：模型 API 请求与余额查询都按此路由',
+          'proxy.default': '跟随默认',
+          'proxy.direct': '直连（不走代理）',
+          'proxy.proxy': '走代理',
+          'proxy.needUrl': '先在「设置 → 余额」填写代理地址',
+          'proxy.settingsTitle': '代理设置',
+          'proxy.intro': '代理地址在这里统一填写；每家供应商是否使用，在「设置 → 模型」对应卡片上选择（跟随默认 / 直连 / 走代理）。模型 API 请求与余额、登录查询都按此路由；跟随默认保持 DSH 原有行为，直连会绕过环境代理。',
+          'proxy.urlPlaceholder': 'http://127.0.0.1:7897',
+          'proxy.save': '保存代理',
+          'proxy.saved': '已保存，立即生效',
+          'proxy.invalid': '代理地址只支持 http(s)://',
         }
         const en = {
           nav: 'Balance',
@@ -764,6 +897,18 @@ window.__ModuleLoader__.load({
           'xai.loggedIn': 'xAI subscription connected',
           'xai.loginFailed': 'Sign-in failed: {0}',
           'xai.authError': 'Could not read xAI status: {0}',
+          'proxy.label': 'Proxy',
+          'proxy.title': 'Egress for this provider — applies to model API calls and balance queries',
+          'proxy.default': 'Follow default',
+          'proxy.direct': 'Direct (no proxy)',
+          'proxy.proxy': 'Use proxy',
+          'proxy.needUrl': 'Set the proxy URL under Settings → Balance first',
+          'proxy.settingsTitle': 'Proxy',
+          'proxy.intro': 'Set the proxy URL here once; choose per provider under Settings → Models (default / direct / proxy). Model API calls, balance queries and sign-in flows all follow this routing. Default keeps DSH behavior; direct bypasses any environment proxy.',
+          'proxy.urlPlaceholder': 'http://127.0.0.1:7897',
+          'proxy.save': 'Save proxy',
+          'proxy.saved': 'Saved — effective immediately',
+          'proxy.invalid': 'Only http(s):// proxy URLs are supported',
         }
         ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'balance-panel: 文案')
         t = withInterpolation(ctx.locale.bind(NS))
@@ -788,7 +933,10 @@ window.__ModuleLoader__.load({
             // keyed 槽的 owner props 里有 provider 视图；路由名在 provider.provider
             const providerId = props?.provider?.provider ?? props?.provider?.id
             if (typeof providerId !== 'string' || providerId === '') return null
-            return h(VendorPicker, { t: props?.t ?? t, providerId, compact: true })
+            return h('div', null,
+              h(VendorPicker, { t: props?.t ?? t, providerId, compact: true }),
+              h(ProxyPicker, { t: props?.t ?? t, providerId, compact: true }),
+            )
           }))
         } catch (error) {
           console.error(`[balance-panel] 模型卡片注册失败（${family}）：`, error)
@@ -1196,6 +1344,26 @@ window.__ModuleLoader__.load({
         padding: '4px 10px',
         fontSize: 12,
         cursor: 'pointer',
+      },
+      proxyBox: {
+        border: '1px solid var(--dsw-alias-border-l2)',
+        borderRadius: 8,
+        padding: '12px 14px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+        maxWidth: 720,
+      },
+      proxyTitle: { fontSize: 13, fontWeight: 600 },
+      proxyIntro: { fontSize: 12, opacity: 0.66, lineHeight: 1.7 },
+      input: {
+        flex: '1 1 260px',
+        background: 'transparent',
+        border: '1px solid var(--dsw-alias-border-l2)',
+        borderRadius: 6,
+        padding: '6px 8px',
+        fontSize: 12,
+        color: 'inherit',
       },
     }
 

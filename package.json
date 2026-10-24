@@ -38,7 +38,7 @@
     "dsh": ">=0.2.0"
   },
   "scripts": {
-    "test": "node --test test/adapters.test.mjs test/plugin.test.mjs test/client.test.mjs test/xai.test.mjs"
+    "test": "node --test test/adapters.test.mjs test/plugin.test.mjs test/client.test.mjs test/xai.test.mjs test/proxy.test.mjs"
   },
   "keywords": [
     "dsh-plugin",
@@ -47,5 +47,8 @@
     "quota",
     "coding-plan"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "undici": "^8.12.3"
+  }
 }

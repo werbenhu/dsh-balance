@@ -317,7 +317,7 @@ test('POST /order：校验并保存卡片顺序，重载后恢复且新卡片排
     assert.deepEqual(JSON.parse(saved.captured.body).order, ['second', 'deepseek-account', 'first'])
 
     const stored = JSON.parse(readFileSync(join(home, 'data', 'balance-panel', 'settings.json'), 'utf8'))
-    assert.deepEqual(stored, { vendors: {}, order: ['second', 'deepseek-account', 'first'] })
+    assert.deepEqual(stored, { vendors: {}, order: ['second', 'deepseek-account', 'first'], proxy: { url: '', providers: {} } })
 
     const reloaded = fakeRes()
     await setup().handler(fakeReq(), reloaded)

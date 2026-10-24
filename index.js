@@ -15,6 +15,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 import { detectVendor, queryAccountBalance, queryBalance, VENDORS } from './src/adapters.js'
+import { PROXY_MODES, ProxyRouter, normalizeProxyUrl, providerHosts } from './src/proxy.js'
 import { XAI_TOKEN_REF, XaiOAuthService } from './src/xai-oauth.js'
 
 export const name = 'dsh-balance-panel'
@@ -74,12 +75,26 @@ function settingsPath() {
   return join(home, 'data', 'balance-panel', 'settings.json')
 }
 
+/** 代理设置的默认值与清洗：url 只允许 http(s)，每家供应商 direct/proxy，缺省即跟随默认。 */
+function sanitizeProxySettings(raw) {
+  const out = { url: '', providers: {} }
+  if (raw === null || typeof raw !== 'object') return out
+  const url = normalizeProxyUrl(raw.url)
+  out.url = typeof url === 'string' ? url : ''
+  if (raw.providers !== null && typeof raw.providers === 'object') {
+    for (const [id, mode] of Object.entries(raw.providers)) {
+      if (typeof id === 'string' && id !== '' && (mode === 'direct' || mode === 'proxy')) out.providers[id] = mode
+    }
+  }
+  return out
+}
+
 function loadSettings() {
   try {
     const path = settingsPath()
-    if (!existsSync(path)) return { vendors: {}, order: [] }
+    if (!existsSync(path)) return { vendors: {}, order: [], proxy: sanitizeProxySettings() }
     const parsed = JSON.parse(readFileSync(path, 'utf8'))
-    if (parsed === null || typeof parsed !== 'object') return { vendors: {}, order: [] }
+    if (parsed === null || typeof parsed !== 'object') return { vendors: {}, order: [], proxy: sanitizeProxySettings() }
     const vendors = {}
     if (parsed.vendors !== null && typeof parsed.vendors === 'object') {
       for (const [key, value] of Object.entries(parsed.vendors)) {
@@ -89,9 +104,9 @@ function loadSettings() {
     const order = Array.isArray(parsed.order)
       ? [...new Set(parsed.order.filter((item) => typeof item === 'string'))]
       : []
-    return { vendors, order }
+    return { vendors, order, proxy: sanitizeProxySettings(parsed.proxy) }
   } catch {
-    return { vendors: {}, order: [] }
+    return { vendors: {}, order: [], proxy: sanitizeProxySettings() }
   }
 }
 
@@ -358,6 +373,27 @@ export function apply(ctx, rawConfig) {
     onLogout: () => cache.clear(),
   })
 
+  // —— 按供应商的代理分流：模型 API 与余额/OAuth 共用同一个全局路由 ——
+
+  const proxyRouter = new ProxyRouter({ logger })
+
+  /** 让路由与「providers 配置 × 代理设置」一致；规则没变化时内部直接返回。 */
+  const syncProxy = async () => {
+    const discovered = discoverProviders(ctx)
+    const byId = new Map(discovered.map((provider) => [provider.id, provider]))
+    // 还没出现在配置里的供应商也允许预设（例如先给 xai 配代理再登录）
+    const ids = new Set([...byId.keys(), ...Object.keys(settings.proxy.providers)])
+    const rules = new Map()
+    for (const id of ids) {
+      const mode = settings.proxy.providers[id] ?? 'default'
+      if (mode === 'default') continue
+      const provider = byId.get(id) ?? { id, baseUrl: id === 'xai' ? XAI_PROVIDER_DEFAULTS.baseURL : undefined }
+      const vendor = byId.has(id) ? vendorOf(provider).vendor : id === 'xai' ? 'grok' : undefined
+      for (const host of providerHosts({ ...provider, vendor })) rules.set(host, mode)
+    }
+    await proxyRouter.sync({ proxyUrl: settings.proxy.url, rules })
+  }
+
   ctx.effect(() => {
     void xai.restore().catch((error) => {
       logger?.warn?.(`[balance-panel] xAI 登录态恢复失败：${String(error?.message ?? error)}`)
@@ -365,9 +401,17 @@ export function apply(ctx, rawConfig) {
     const stopTimer = xai.startRefreshTimer()
     const deferred = setTimeout(() => ensureWithRetry(), 1500)
     deferred.unref?.()
+    const proxyDeferred = setTimeout(() => {
+      void syncProxy().catch((error) => {
+        logger?.warn?.(`[balance-panel] 代理路由初始化失败：${String(error?.message ?? error)}`)
+      })
+    }, 100)
+    proxyDeferred.unref?.()
     return () => {
       clearTimeout(deferred)
+      clearTimeout(proxyDeferred)
       stopTimer()
+      void proxyRouter.dispose()
     }
   }, 'balance-panel: xAI')
 
@@ -436,6 +480,10 @@ export function apply(ctx, rawConfig) {
   }
 
   const snapshot = async (force) => {
+    // 供应商可能刚改过配置，查询前先让代理规则跟上（没变化时零开销）
+    await syncProxy().catch((error) => {
+      logger?.warn?.(`[balance-panel] 代理路由同步失败：${String(error?.message ?? error)}`)
+    })
     const providers = await allProviders()
     if (force) {
       for (const provider of providers) cache.delete(`${provider.id}:${vendorOf(provider).vendor}`)
@@ -571,6 +619,44 @@ export function apply(ctx, rawConfig) {
               return
             }
             sendJson(res, 200, { ok: true, provider, entry })
+            return
+          }
+
+          // —— 代理设置：全局代理地址 + 每家供应商的出口选择 ——
+
+          if (url.pathname === '/api/dsh-balance-panel/proxy') {
+            if (isGet) {
+              sendJson(res, 200, { proxy: settings.proxy })
+              return
+            }
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { error: 'method not allowed' })
+              return
+            }
+            const body = await readJsonBody(req)
+            if (Object.hasOwn(body, 'url')) {
+              const normalized = normalizeProxyUrl(body.url)
+              if (normalized === undefined) {
+                sendJson(res, 400, { error: '代理地址只支持 http(s)://，例如 http://127.0.0.1:7897' })
+                return
+              }
+              settings.proxy.url = normalized
+            }
+            if (Object.hasOwn(body, 'provider') || Object.hasOwn(body, 'mode')) {
+              const provider = String(body?.provider ?? '')
+              const mode = String(body?.mode ?? '')
+              if (provider === '' || !PROXY_MODES.includes(mode)) {
+                sendJson(res, 400, { error: 'provider 或代理模式不合法' })
+                return
+              }
+              if (mode === 'default') delete settings.proxy.providers[provider]
+              else settings.proxy.providers[provider] = mode
+            }
+            saveSettings(settings)
+            // 路由变了，旧结果可能来自另一条网络路径，全部重查
+            cache.clear()
+            await syncProxy()
+            sendJson(res, 200, { ok: true, proxy: settings.proxy })
             return
           }
 
