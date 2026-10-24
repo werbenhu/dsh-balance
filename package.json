@@ -1,6 +1,6 @@
 {
   "name": "dsh-balance-panel",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "DeepSeek Harness 插件：为每个模型供应商选择余额查询方式，菜单栏入口 + 右侧抽屉查看各家套餐余额与配额。",
@@ -38,7 +38,7 @@
     "dsh": ">=0.2.0"
   },
   "scripts": {
-    "test": "node --test test/adapters.test.mjs test/plugin.test.mjs test/client.test.mjs"
+    "test": "node --test test/adapters.test.mjs test/plugin.test.mjs test/client.test.mjs test/xai.test.mjs"
   },
   "keywords": [
     "dsh-plugin",

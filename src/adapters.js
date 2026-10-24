@@ -12,6 +12,8 @@
  *   - 不换算汇率。上游给什么币种就是什么币种，前端按币种加符号。
  */
 
+import { fetchGrokUsage } from './xai-usage.js'
+
 /** 可选的查询方式。`label` 是下拉文案，`hint` 说明前提条件。 */
 export const VENDORS = [
   { id: 'auto', label: '自动识别（按地址判断）', hint: '根据 baseURL 的域名选择下面的实现' },
@@ -24,7 +26,7 @@ export const VENDORS = [
   { id: 'bigmodel-coding', label: '智谱 BigModel Coding Plan', hint: 'bigmodel.cn 根域的配额接口' },
   { id: 'minimax-coding', label: 'MiniMax Token Plan', hint: '/coding_plan/remains' },
   { id: 'commandcode', label: 'Command Code', hint: '/alpha/billing/credits，credits 与窗口' },
-  { id: 'grok', label: 'Grok (xAI)', hint: '仅 OAuth 登录态可查，API Key 没有公开接口' },
+  { id: 'grok', label: 'Grok (xAI 订阅)', hint: 'OAuth 登录（SuperGrok / X Premium），卡片上可直接登录' },
   { id: 'siliconflow', label: 'SiliconFlow 余额', hint: '/v1/user/info 的 totalBalance' },
   { id: 'novita', label: 'Novita 余额', hint: '/v3/user/balance' },
   { id: 'stepfun', label: '阶跃星辰余额', hint: '/v1/accounts' },
@@ -601,17 +603,79 @@ async function probeCommandCode({ apiKey, fetchImpl, timeoutMs }) {
 }
 
 /**
- * Grok (xAI)：`{base}/billing?format=credits`。
+ * Grok (xAI 订阅)：Grok CLI 的计费代理，只认 OAuth 访问令牌。
  *
- * 只有 OAuth 登录态能查（one-proxy 从会话里取 access token）。DSH 里的供应商
- * 是 API Key 形态，没有 OAuth 会话，所以直接说明原因 —— 拿 API Key 去打一个
- * 必然 401 的接口只会让人以为密钥填错了。
+ * `xai` 是 Host 侧的 OAuth 服务：有它就走登录态（自动续期、30 秒用量缓存）；
+ * 没有它（纯适配器调用）才退回用 apiKey 当 Bearer 直接打上游。
+ * 未登录返回 needsLogin，前端据此显示「登录 xAI」而不是红色报错。
  */
-async function probeGrok() {
-  return {
-    ok: false,
-    error: 'Grok 的额度接口只认 OAuth 登录态，API Key 形态查不到',
-    unsupported: true,
+function grokProductLabel(product) {
+  const normalized = String(product ?? '').toLowerCase()
+  if (normalized === 'grokbuild') return 'Grok Build'
+  if (normalized === 'grokchat') return 'Grok 聊天'
+  if (normalized === 'grokimagine') return 'Grok Imagine'
+  if (normalized === 'api') return 'API'
+  return String(product ?? '其他').replace(/^Grok/i, 'Grok ')
+}
+
+/** 归一化用量 → 面板结果：主数值是周期已用百分比，明细带各产品窗口与重置时间。 */
+export function grokUsageResult(usage) {
+  const details = []
+  const usedPercent = num(usage?.usedPercent)
+  const used = num(usage?.used)
+  const limit = num(usage?.monthlyLimit)
+  const periodLabel = usage?.periodType === 'weekly' ? '本周额度'
+    : usage?.periodType === 'monthly' ? '本月额度' : '本周期额度'
+  const resetAt = resetAtOf(usage?.periodEnd)
+
+  if (usedPercent !== undefined || used !== undefined) {
+    details.push({
+      label: periodLabel,
+      percent: usedPercent === undefined ? undefined : Math.round(usedPercent),
+      value: used !== undefined && limit !== undefined && limit > 0
+        ? `${Math.round(used)} / ${Math.round(limit)}`
+        : undefined,
+      resetAt,
+    })
+  }
+
+  for (const row of Array.isArray(usage?.productUsage) ? usage.productUsage : []) {
+    const percent = num(row?.usagePercent)
+    if (percent === undefined) continue
+    details.push({ label: grokProductLabel(row.product), percent: Math.round(percent) })
+  }
+
+  const prepaid = num(usage?.prepaidBalance)
+  if (prepaid !== undefined && prepaid > 0) details.push({ label: '预付余额', value: String(Math.round(prepaid)) })
+  if (usage?.onDemandEnabled === true) {
+    const cap = num(usage?.onDemandCap)
+    details.push({ label: '按需计费', value: cap !== undefined && cap > 0 ? `已开启（上限 ${Math.round(cap)}）` : '已开启' })
+  }
+  if (typeof usage?.planType === 'string' && usage.planType !== '') {
+    details.push({ label: '套餐', value: usage.planType })
+  }
+
+  if (details.length === 0) return { ok: false, error: 'xAI 没有返回可识别的额度字段' }
+  return result_('quota', usedPercent === undefined ? usage?.planType ?? '' : `${Math.round(usedPercent)}%`, details, {
+    ...(typeof usage?.planType === 'string' ? { planType: usage.planType } : {}),
+    ...(resetAt === undefined ? {} : { resetAt }),
+  })
+}
+
+async function probeGrok({ apiKey, fetchImpl, timeoutMs, xai }) {
+  if (xai === undefined && (typeof apiKey !== 'string' || apiKey === '')) {
+    return { ok: false, error: '尚未登录 xAI，点下方「登录 xAI」完成授权', needsLogin: true }
+  }
+  try {
+    const usage = xai !== undefined
+      ? await xai.fetchUsage({ refresh: true })
+      : await fetchGrokUsage({ apiKey, fetchImpl, timeoutMs })
+    return grokUsageResult(usage)
+  } catch (error) {
+    if (error?.code === 'XAI_NOT_LOGGED_IN') {
+      return { ok: false, error: '尚未登录 xAI，点下方「登录 xAI」完成授权', needsLogin: true }
+    }
+    throw error
   }
 }
 
@@ -723,7 +787,7 @@ const IMPLEMENTATIONS = {
  * `vendor` 为 auto 时先按 baseURL 推断；推断不出来返回 needsVendor，让前端
  * 提示用户去下拉里指定，而不是拿错适配器打一次无意义的请求。
  */
-export async function queryBalance({ vendor, baseUrl, apiKey, fetchImpl, timeoutMs }) {
+export async function queryBalance({ vendor, baseUrl, apiKey, fetchImpl, timeoutMs, xai }) {
   const resolved = vendor === 'auto' || vendor === undefined || vendor === ''
     ? detectVendor(baseUrl)
     : vendor
@@ -739,7 +803,7 @@ export async function queryBalance({ vendor, baseUrl, apiKey, fetchImpl, timeout
   }
 
   try {
-    const result = await implementation({ baseUrl, apiKey, fetchImpl, timeoutMs })
+    const result = await implementation({ baseUrl, apiKey, fetchImpl, timeoutMs, xai })
     return { ...result, vendor: resolved }
   } catch (error) {
     return { ok: false, error: String(error?.message ?? error), vendor: resolved }

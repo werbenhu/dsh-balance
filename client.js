@@ -40,6 +40,10 @@ window.__ModuleLoader__.load({
     const VENDOR_ROUTE = '/api/dsh-balance-panel/vendor'
     const ORDER_ROUTE = '/api/dsh-balance-panel/order'
     const PROVIDERS_ROUTE = '/api/dsh-balance-panel/providers'
+    const XAI_STATUS_ROUTE = '/api/dsh-balance-panel/xai/status'
+    const XAI_LOGIN_ROUTE = '/api/dsh-balance-panel/xai/login'
+    const XAI_LOGOUT_ROUTE = '/api/dsh-balance-panel/xai/logout'
+    const XAI_CANCEL_ROUTE = '/api/dsh-balance-panel/xai/cancel'
 
     /** 查询方式目录只需取一次：模块级缓存，多个组件共用。 */
     let vendorsCache
@@ -167,12 +171,14 @@ window.__ModuleLoader__.load({
 
     /** 一张供应商卡片：拖拽手柄 + 状态点 + 名称 + 主数值 + 明细。 */
     function ProviderCard({
-      entry, compact, t, onRefresh, refreshing,
+      entry, compact, t, onRefresh, refreshing, xai,
       dragging, dragOver, onDragStart, onDragEnd, onDragOver, onDrop, onMove,
     }) {
       const result = entry.result ?? {}
       const failing = result.ok === false
+      const needsLogin = result.needsLogin === true
       const idle = result.kind === 'none'
+      const isGrok = entry.vendor === 'grok'
       const details = Array.isArray(result.details) ? result.details.slice(0, compact ? 2 : 4) : []
 
       return h('div', {
@@ -214,10 +220,13 @@ window.__ModuleLoader__.load({
           h('span', {
             style: {
               ...styles.dot,
-              background: failing ? TONE.bad : idle ? TONE.idle : result.unavailable === true ? TONE.warn : TONE.ok,
+              background: needsLogin ? TONE.idle : failing ? TONE.bad : idle ? TONE.idle : result.unavailable === true ? TONE.warn : TONE.ok,
             },
           }),
           h('span', { style: styles.cardName }, entry.label),
+          typeof result.planType === 'string' && result.planType !== ''
+            ? h('span', { style: styles.badge }, result.planType)
+            : null,
           entry.vendorSource === 'auto'
             ? h('span', { style: styles.badge }, t('badge.auto'))
             : null,
@@ -234,7 +243,8 @@ window.__ModuleLoader__.load({
         idle
           ? h('div', { style: styles.hint }, t('hint.disabled'))
           : failing
-            ? h('div', { style: { ...styles.hint, color: TONE.bad } }, result.error ?? t('error.unknown'))
+            ? h('div', { style: needsLogin ? styles.hint : { ...styles.hint, color: TONE.bad } },
+              result.error ?? t('error.unknown'))
             : null,
 
         !failing && !idle
@@ -251,6 +261,8 @@ window.__ModuleLoader__.load({
             item,
             t,
           }))),
+
+        isGrok ? h(XaiAuth, { xai, compact, t }) : null,
       )
     }
 
@@ -315,6 +327,115 @@ window.__ModuleLoader__.load({
       return { ...state, refresh, refreshProvider, busy }
     }
 
+    /**
+     * xAI 登录态：只在列表里确实有 Grok 卡时才轮询（授权中 2 秒，否则 30 秒）。
+     * 状态里永远没有令牌，只有登录流程信息与 csrf。
+     */
+    function useXai(enabled) {
+      const [state, setState] = useState({ status: undefined, error: undefined, busy: false })
+      const pending = state.status?.loginPending === true
+
+      const load = useCallback(async () => {
+        try {
+          const response = await fetch(XAI_STATUS_ROUTE, { headers: { accept: 'application/json' }, cache: 'no-store' })
+          if (!response.ok) throw new Error(`HTTP ${response.status}`)
+          const status = await response.json()
+          setState((prev) => ({ ...prev, status, error: undefined }))
+        } catch (error) {
+          setState((prev) => ({ ...prev, error: String(error?.message ?? error) }))
+        }
+      }, [])
+
+      useEffect(() => {
+        if (!enabled) return undefined
+        void load()
+        const timer = window.setInterval(() => { void load() }, pending ? 2000 : 30000)
+        return () => window.clearInterval(timer)
+      }, [enabled, pending, load])
+
+      const act = useCallback(async (route) => {
+        setState((prev) => ({ ...prev, busy: true }))
+        try {
+          const headers = { 'content-type': 'application/json' }
+          if (route === XAI_LOGOUT_ROUTE) {
+            const csrf = state.status?.csrf
+            if (typeof csrf !== 'string' || csrf === '') return
+            headers['x-dsh-csrf'] = csrf
+          }
+          const response = await fetch(route, { method: 'POST', headers, body: '{}' })
+          if (!response.ok) throw new Error(`HTTP ${response.status}`)
+          await load()
+        } catch (error) {
+          setState((prev) => ({ ...prev, error: String(error?.message ?? error) }))
+        } finally {
+          setState((prev) => ({ ...prev, busy: false }))
+        }
+      }, [load, state.status?.csrf])
+
+      return {
+        ...state,
+        pending,
+        login: () => act(XAI_LOGIN_ROUTE),
+        logout: () => act(XAI_LOGOUT_ROUTE),
+        cancel: () => act(XAI_CANCEL_ROUTE),
+        reload: load,
+      }
+    }
+
+    /** Grok 卡片里的授权区：登录按钮 / 用户码 + 授权页 / 退出。 */
+    function XaiAuth({ xai, compact, t }) {
+      if (xai === undefined) return null
+      const status = xai.status
+      const loginState = status?.loginState
+      const waiting = status?.loginPending === true || loginState?.status === 'pending'
+      const connected = status?.loggedIn === true
+
+      return h('div', { style: styles.authBlock },
+        xai.error === undefined ? null : h('div', { style: { ...styles.hint, color: TONE.bad } },
+          t('xai.authError', xai.error)),
+        status?.loginError === undefined || status?.loginError === null ? null
+          : h('div', { style: { ...styles.hint, color: TONE.bad } }, t('xai.loginFailed', status.loginError)),
+
+        waiting && typeof loginState?.userCode === 'string'
+          ? h('div', null,
+            h('div', { style: styles.codeRow },
+              h('span', { style: styles.codeValue }, loginState.userCode),
+              h('button', {
+                type: 'button',
+                style: styles.primaryButton,
+                onClick: () => window.open(loginState.verificationUri, 'dsh-xai-verification', 'noopener,noreferrer'),
+              }, t('xai.openAuth')),
+            ),
+            h('div', { style: styles.hint },
+              t('xai.codeHint', String(Math.max(1, Math.round((loginState.expiresInSeconds ?? 900) / 60))))),
+          )
+          : null,
+
+        h('div', { style: styles.authRow },
+          connected
+            ? h('span', { style: { ...styles.hint, color: TONE.ok } }, t('xai.loggedIn'))
+            : h('button', {
+              type: 'button',
+              style: styles.primaryButton,
+              disabled: xai.busy || waiting,
+              onClick: () => { void xai.login() },
+            }, waiting ? t('xai.pending') : t('xai.login')),
+          waiting
+            ? h('button', { type: 'button', style: styles.button, onClick: () => { void xai.cancel() } }, t('xai.cancel'))
+            : null,
+          connected && !compact
+            ? h('button', {
+              type: 'button',
+              style: styles.button,
+              disabled: xai.busy,
+              onClick: () => { void xai.logout() },
+            }, t('xai.logout'))
+            : null,
+        ),
+        connected || waiting ? null : h('div', { style: styles.hint }, t('xai.loginHint')),
+      )
+    }
+
     function arrangeProviders(providers, order) {
       if (order.length === 0) return providers
       const positions = new Map(order.map((id, index) => [id, index]))
@@ -331,6 +452,17 @@ window.__ModuleLoader__.load({
       const [orderError, setOrderError] = useState(false)
       const orderWrites = useRef(Promise.resolve())
       const orderedProviders = arrangeProviders(providers, order)
+
+      // Grok 卡需要登录态：授权完成 / 退出登录时整列重查，数字立刻跟着变
+      const hasGrok = providers.some((entry) => entry.vendor === 'grok')
+      const xai = useXai(hasGrok)
+      const xaiLoggedIn = useRef(undefined)
+      useEffect(() => {
+        const logged = xai.status?.loggedIn
+        if ((logged === true && xaiLoggedIn.current === false)
+          || (logged === false && xaiLoggedIn.current === true)) refresh()
+        xaiLoggedIn.current = logged
+      }, [xai.status?.loggedIn, refresh])
 
       const reorder = (sourceId, targetId) => {
         const ids = orderedProviders.map((entry) => entry.id)
@@ -404,6 +536,7 @@ window.__ModuleLoader__.load({
           compact,
           t,
           refreshing: busy[entry.id] === true,
+          xai: entry.vendor === 'grok' ? xai : undefined,
           dragging: draggedId === entry.id,
           dragOver: dragOverId === entry.id && draggedId !== entry.id,
           onRefresh: () => refreshProvider(entry.id),
@@ -581,6 +714,16 @@ window.__ModuleLoader__.load({
           'card.refresh': '只刷新这一家的余额',
           'card.reorder': '拖动调整顺序',
           'order.failed': '顺序保存失败，请重试',
+          'xai.login': '登录 xAI',
+          'xai.logout': '退出登录',
+          'xai.pending': '等待授权…',
+          'xai.openAuth': '打开授权页',
+          'xai.cancel': '取消',
+          'xai.codeHint': '在 xAI 官方页面登录并批准（用户码约 {0} 分钟内有效）',
+          'xai.loginHint': '用 SuperGrok / X Premium 订阅登录，无需 API Key；登录后 Grok 模型与余额一起可用',
+          'xai.loggedIn': '已连接 xAI 订阅',
+          'xai.loginFailed': '登录失败：{0}',
+          'xai.authError': 'xAI 状态读取失败：{0}',
         }
         const en = {
           nav: 'Balance',
@@ -611,6 +754,16 @@ window.__ModuleLoader__.load({
           'card.refresh': 'Refresh this provider only',
           'card.reorder': 'Drag to reorder',
           'order.failed': 'Could not save the card order. Please try again.',
+          'xai.login': 'Sign in to xAI',
+          'xai.logout': 'Sign out',
+          'xai.pending': 'Waiting for approval…',
+          'xai.openAuth': 'Open authorization page',
+          'xai.cancel': 'Cancel',
+          'xai.codeHint': 'Approve on the official xAI page (code valid for about {0} minutes)',
+          'xai.loginHint': 'Use a SuperGrok / X Premium subscription — no API key. Signing in enables Grok models and this balance card.',
+          'xai.loggedIn': 'xAI subscription connected',
+          'xai.loginFailed': 'Sign-in failed: {0}',
+          'xai.authError': 'Could not read xAI status: {0}',
         }
         ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'balance-panel: 文案')
         t = withInterpolation(ctx.locale.bind(NS))
@@ -1018,6 +1171,32 @@ window.__ModuleLoader__.load({
       },
       modelLabel: { fontSize: 12, opacity: 0.7, whiteSpace: 'nowrap' },
       modelHint: { fontSize: 11, opacity: 0.45 },
+      authBlock: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6,
+        marginTop: 4,
+        paddingTop: 8,
+        borderTop: '1px dashed var(--dsw-alias-border-l1)',
+      },
+      authRow: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 },
+      codeRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
+      codeValue: {
+        fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace',
+        fontSize: 18,
+        fontWeight: 700,
+        letterSpacing: 2,
+      },
+      primaryButton: {
+        appearance: 'none',
+        border: '1px solid var(--dsw-alias-border-l3)',
+        background: 'var(--dsw-alias-label-primary)',
+        color: 'var(--dsw-alias-bg-layer-1)',
+        borderRadius: 6,
+        padding: '4px 10px',
+        fontSize: 12,
+        cursor: 'pointer',
+      },
     }
 
     exports.name = 'dsh-balance-panel-client'

@@ -226,17 +226,65 @@ test('auto：推断不出来时返回 needsVendor，而不是瞎打一个地址'
   assert.equal(result.needsVendor, true)
 })
 
-test('Grok：API Key 形态明确说明不支持，而不是打一次必然 401 的请求', async () => {
+test('Grok：没有令牌时返回 needsLogin，不打无谓的上游请求', async () => {
   let called = false
   const fetchImpl = async () => {
     called = true
     return new Response('{}', { status: 200 })
   }
-  const result = await queryBalance({ vendor: 'grok', baseUrl: 'https://api.x.ai/v1', apiKey: 'xai-abc', fetchImpl })
+  const result = await queryBalance({ vendor: 'grok', baseUrl: 'https://api.x.ai/v1', apiKey: '', fetchImpl })
 
   assert.equal(result.ok, false)
-  assert.equal(result.unsupported, true)
+  assert.equal(result.needsLogin, true)
   assert.equal(called, false)
+})
+
+test('Grok：OAuth 令牌查询订阅用量，主数值是周期已用百分比', async () => {
+  const fetchImpl = fakeFetch({
+    'https://cli-chat-proxy.grok.com/v1/billing?format=credits': {
+      body: {
+        subscription_tier: 'SuperGrok',
+        config: {
+          creditUsagePercent: 21,
+          currentPeriod: { type: 'WEEKLY', start: '2026-10-20T08:10:12+00:00', end: '2026-10-27T08:10:12+00:00' },
+          productUsage: [{ product: 'GrokBuild', usagePercent: 20 }, { product: 'GrokChat', usagePercent: 1 }],
+          isUnifiedBillingUser: true,
+        },
+      },
+    },
+    'https://cli-chat-proxy.grok.com/v1/settings': { body: { subscription_tier_display: 'SuperGrok' } },
+    'https://api.x.ai/v1/me': { body: { user_id: 'u-1', team_id: 't-1' } },
+  })
+
+  const result = await queryBalance({ vendor: 'grok', baseUrl: 'https://api.x.ai/v1', apiKey: 'xai-oauth-token', fetchImpl })
+
+  assert.equal(result.ok, true)
+  assert.equal(result.vendor, 'grok')
+  assert.equal(result.kind, 'quota')
+  assert.equal(result.summary, '21%')
+  assert.equal(result.planType, 'SuperGrok')
+  assert.equal(result.details[0].label, '本周额度')
+  assert.equal(result.details[0].percent, 21)
+  assert.equal(typeof result.details[0].resetAt, 'number')
+  assert.deepEqual(result.details.slice(1, 3).map((item) => [item.label, item.percent]), [['Grok Build', 20], ['Grok 聊天', 1]])
+  assert.equal(fetchImpl.calls[0].headers.authorization, 'Bearer xai-oauth-token')
+  assert.equal(fetchImpl.calls[0].headers['x-xai-token-auth'], 'xai-grok-cli')
+})
+
+test('Grok：只有 used/monthlyLimit 时反算百分比，产品用量缺失也不报错', async () => {
+  const fetchImpl = fakeFetch({
+    'https://cli-chat-proxy.grok.com/v1/billing?format=credits': {
+      body: { config: { used: 250, monthlyLimit: 1000, currentPeriod: { type: 'MONTHLY' } } },
+    },
+    '*': { body: {} },
+  })
+
+  const result = await queryBalance({ vendor: 'grok', apiKey: 'token', fetchImpl })
+
+  assert.equal(result.ok, true)
+  assert.equal(result.summary, '25%')
+  assert.equal(result.details[0].label, '本月额度')
+  assert.equal(result.details[0].value, '250 / 1000')
 })
 
 test('detectVendor：覆盖各家的典型 baseURL', () => {

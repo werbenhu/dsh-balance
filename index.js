@@ -15,9 +15,10 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 import { detectVendor, queryAccountBalance, queryBalance, VENDORS } from './src/adapters.js'
+import { XAI_TOKEN_REF, XaiOAuthService } from './src/xai-oauth.js'
 
 export const name = 'dsh-balance-panel'
-export const version = '0.1.0'
+export const version = '0.2.0'
 
 /** 官方登录余额在内部使用的查询方式 id；不出现在可选列表里。 */
 const ACCOUNT_VENDOR = 'deepseek-account'
@@ -32,6 +33,10 @@ const DEFAULTS = {
   vendors: {},
   /** 这些供应商不查询（仍然显示，只是不发请求）。 */
   disabled: [],
+  /** 自动把 xAI 模型路由写进 llm-pi-ai（走官方 configEditor，用户不用碰 YAML）。 */
+  xaiAutoProvider: true,
+  /** xAI 令牌文件位置；空串 = $DSH_HOME/xai-oauth.json。 */
+  xaiPath: '',
 }
 
 const CONFIG_KEYS = Object.keys(DEFAULTS)
@@ -58,6 +63,8 @@ function resolveConfig(raw) {
   if (Array.isArray(raw.disabled)) {
     out.disabled = raw.disabled.filter((item) => typeof item === 'string')
   }
+  if (typeof raw.xaiAutoProvider === 'boolean') out.xaiAutoProvider = raw.xaiAutoProvider
+  if (typeof raw.xaiPath === 'string') out.xaiPath = raw.xaiPath
   return out
 }
 
@@ -197,12 +204,70 @@ export async function resolveApiKey(ctx, apiKeyEnv) {
   return typeof fromEnv === 'string' ? fromEnv : ''
 }
 
+/**
+ * xAI 模型路由的默认字段。
+ *
+ * 不写 models：llm-pi-ai 会用内置目录里 xai 的全部模型（grok-4.x 系列），
+ * 新型号随宿主目录升级自动出现，插件不用跟着发版。
+ */
+export const XAI_PROVIDER_DEFAULTS = {
+  displayName: 'xAI (Grok)',
+  api: 'openai-responses',
+  baseURL: 'https://api.x.ai/v1',
+  apiKeyEnv: XAI_TOKEN_REF,
+}
+
+function withXaiDefaults(existing) {
+  const source = existing !== null && typeof existing === 'object' ? existing : {}
+  const next = { ...source }
+  for (const key of ['displayName', 'api', 'baseURL']) {
+    if (next[key] === undefined) next[key] = XAI_PROVIDER_DEFAULTS[key]
+  }
+  // 凭据来源固定是 OAuth 服务发布的引用，这是插件的本职，必须覆盖旧值
+  next.apiKeyEnv = XAI_TOKEN_REF
+  return next
+}
+
+/**
+ * 确保 `llm-pi-ai` 里有可用的 xai 路由 —— 用户不需要手工编辑任何配置文件。
+ *
+ * 走 DSH 官方的 configEditor（和「设置 → 模型」页同一条写入路径）：校验、
+ * 落盘、Loader 热重载一次完成，插件重启后也不会重复写（字段齐了就直接返回）。
+ * 用户已有的 models / 其它自定义字段原样保留。
+ */
+export async function ensureXaiProvider(ctx) {
+  const editor = ctx.get('configEditor')
+  if (editor === undefined || typeof editor.edit !== 'function' || typeof editor.entries !== 'function') {
+    return { ok: false, reason: 'config-editor-unavailable' }
+  }
+  const entry = (editor.entries() ?? []).find((item) =>
+    item?.options?.name === '@deepseek-ai/dsh-llm-pi-ai' || item?.options?.id === 'llm-pi-ai')
+  if (entry === undefined) return { ok: false, reason: 'llm-pi-ai-not-mounted' }
+
+  const existing = entry.options?.config?.providers?.xai
+  const merged = withXaiDefaults(existing)
+  const before = existing ?? {}
+  const changed = Object.keys(merged).some((key) => merged[key] !== before[key])
+  if (!changed) return { ok: true, changed: false }
+
+  await editor.edit(entry, (current) => ({
+    ...current,
+    providers: {
+      ...(current?.providers ?? {}),
+      xai: withXaiDefaults(current?.providers?.xai),
+    },
+  }))
+  return { ok: true, changed: true }
+}
+
 /** 同源校验：插件路由不经过 DSH 自己的来源检查，这里自己补一道。 */
 export function isTrustedRequest(req) {
   const headers = req?.headers ?? {}
   if (String(headers['sec-fetch-site'] ?? '').toLowerCase() === 'cross-site') return false
   const origin = headers.origin
   if (origin === undefined || origin === '') return true
+  // DSH Desktop 的特权 Web 源；本机控制服务同源路由，等同于本地页面
+  if (String(origin) === 'dsh-app://app') return true
   try {
     const host = new URL(String(origin)).hostname.toLowerCase()
     return host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '[::1]'
@@ -260,6 +325,52 @@ export function apply(ctx, rawConfig) {
   /** 结果缓存：key 是 `${id}:${vendor}`，换查询方式后自然失效。 */
   const cache = new Map()
 
+  // —— xAI：OAuth 登录 + 自动续期 + 模型路由自动配置 ——
+
+  /** 登录/退出后余额立刻可刷新；登录成功顺手把模型路由补齐。 */
+  function ensureWithRetry(attempt = 0) {
+    if (!config.xaiAutoProvider) return
+    void (async () => {
+      try {
+        const outcome = await ensureXaiProvider(ctx)
+        if (outcome.ok) {
+          logger?.info?.(`[balance-panel] xAI 模型路由已就绪${outcome.changed ? '（已自动写入，无需手改配置）' : ''}`)
+          return
+        }
+      } catch (error) {
+        logger?.warn?.(`[balance-panel] xAI 路由自动配置失败：${String(error?.message ?? error)}`)
+      }
+      if (attempt < 4) {
+        const retry = setTimeout(() => ensureWithRetry(attempt + 1), 3000)
+        retry.unref?.()
+      }
+    })()
+  }
+
+  const xai = new XaiOAuthService({
+    ctx,
+    filename: config.xaiPath === '' ? undefined : config.xaiPath,
+    logger,
+    onLogin: () => {
+      cache.clear()
+      ensureWithRetry()
+    },
+    onLogout: () => cache.clear(),
+  })
+
+  ctx.effect(() => {
+    void xai.restore().catch((error) => {
+      logger?.warn?.(`[balance-panel] xAI 登录态恢复失败：${String(error?.message ?? error)}`)
+    })
+    const stopTimer = xai.startRefreshTimer()
+    const deferred = setTimeout(() => ensureWithRetry(), 1500)
+    deferred.unref?.()
+    return () => {
+      clearTimeout(deferred)
+      stopTimer()
+    }
+  }, 'balance-panel: xAI')
+
   const probe = async (provider) => {
     const { vendor, source } = vendorOf(provider)
     const key = `${provider.id}:${vendor}`
@@ -285,7 +396,8 @@ export function apply(ctx, rawConfig) {
       })
     } else {
       const apiKey = await resolveApiKey(ctx, provider.apiKeyEnv)
-      result = apiKey === ''
+      // Grok 走 OAuth 服务自己持有的令牌，没有 apiKeyEnv 也能查
+      result = apiKey === '' && vendor !== 'grok'
         ? {
           ok: false,
           error: provider.apiKeyEnv === undefined
@@ -297,6 +409,7 @@ export function apply(ctx, rawConfig) {
           baseUrl: provider.baseUrl,
           apiKey,
           timeoutMs: config.timeoutMs,
+          xai,
         })
     }
 
@@ -458,6 +571,38 @@ export function apply(ctx, rawConfig) {
               return
             }
             sendJson(res, 200, { ok: true, provider, entry })
+            return
+          }
+
+          // —— xAI 登录态与设备码授权（同源路由，不再单开端口）——
+
+          if (url.pathname === '/api/dsh-balance-panel/xai/status') {
+            if (!isGet) {
+              sendJson(res, 405, { error: 'method not allowed' })
+              return
+            }
+            sendJson(res, 200, await xai.status())
+            return
+          }
+
+          if (url.pathname === '/api/dsh-balance-panel/xai/login' && req.method === 'POST') {
+            sendJson(res, 200, await xai.startLogin())
+            return
+          }
+
+          if (url.pathname === '/api/dsh-balance-panel/xai/cancel' && req.method === 'POST') {
+            xai.cancelLogin()
+            sendJson(res, 200, { ok: true })
+            return
+          }
+
+          if (url.pathname === '/api/dsh-balance-panel/xai/logout' && req.method === 'POST') {
+            if (req.headers['x-dsh-csrf'] !== xai.csrf) {
+              sendJson(res, 403, { error: 'CSRF token 不正确' })
+              return
+            }
+            await xai.logout()
+            sendJson(res, 200, { ok: true })
             return
           }
 
