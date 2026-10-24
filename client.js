@@ -933,6 +933,9 @@ window.__ModuleLoader__.load({
             // keyed 槽的 owner props 里有 provider 视图；路由名在 provider.provider
             const providerId = props?.provider?.provider ?? props?.provider?.id
             if (typeof providerId !== 'string' || providerId === '') return null
+            // 「添加模型」的草稿卡：目录行还没保存任何配置，配余额方式/代理没有意义，
+            // 也会让确认区看起来像多出来的表单。已保存的供应商才显示这两项。
+            if (props?.configured === false) return null
             return h('div', null,
               h(VendorPicker, { t: props?.t ?? t, providerId, compact: true }),
               h(ProxyPicker, { t: props?.t ?? t, providerId, compact: true }),
