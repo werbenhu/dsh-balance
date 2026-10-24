@@ -508,11 +508,11 @@ window.__ModuleLoader__.load({
         showHeader
           ? h('div', { style: styles.header },
             h('div', null,
-              h('div', { style: styles.title }, t('title')),
-              h('div', { style: styles.subtitle },
-                error === undefined
-                  ? t('subtitle.count', String(providers.length))
-                  : t('subtitle.error', error)),
+              h('div', { style: styles.title },
+                error === undefined ? t('title.count', String(providers.length)) : t('title')),
+              error === undefined
+                ? null
+                : h('div', { style: { ...styles.subtitle, color: TONE.bad } }, t('subtitle.error', error)),
             ),
             h('button', {
               type: 'button',
@@ -808,7 +808,7 @@ window.__ModuleLoader__.load({
         const zh = {
           nav: '余额',
           title: '套餐余额',
-          'subtitle.count': '{0} 个已配置的供应商',
+          'title.count': '套餐余额（{0} 个供应商）',
           'subtitle.error': '读取失败：{0}',
           'action.refresh': '刷新',
           'action.loading': '查询中…',
@@ -859,7 +859,7 @@ window.__ModuleLoader__.load({
         const en = {
           nav: 'Balance',
           title: 'Plan balances',
-          'subtitle.count': '{0} configured providers',
+          'title.count': 'Plan balances ({0} providers)',
           'subtitle.error': 'Failed: {0}',
           'action.refresh': 'Refresh',
           'action.loading': 'Checking…',
