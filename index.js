@@ -484,6 +484,15 @@ export function apply(ctx, rawConfig) {
     await syncProxy().catch((error) => {
       logger?.warn?.(`[balance-panel] 代理路由同步失败：${String(error?.message ?? error)}`)
     })
+    // 原生「模型」对话框保存时可能清掉 xai 的 baseURL/apiKeyEnv：
+    // 每次打开面板都自检补回，避免余额卡消失、授权后模型仍无凭据
+    if (config.xaiAutoProvider) {
+      try {
+        await ensureXaiProvider(ctx)
+      } catch (error) {
+        logger?.warn?.(`[balance-panel] xAI 路由自检失败：${String(error?.message ?? error)}`)
+      }
+    }
     const providers = await allProviders()
     if (force) {
       for (const provider of providers) cache.delete(`${provider.id}:${vendorOf(provider).vendor}`)
