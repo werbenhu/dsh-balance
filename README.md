@@ -2,7 +2,17 @@
 
 DeepSeek Harness 插件：为每个已配置的模型供应商选一个「余额查询方式」，在侧边栏点「余额」就能看到各家套餐余额与配额窗口。
 
+**支持 Grok（xAI）订阅的网页授权登录与额度查询**：在面板里用 SuperGrok / X Premium 走设备码授权，无需 API Key；授权后直接查询套餐、周期配额与分项用量，并自动配好可用的 Grok 模型路由。也支持按供应商分流代理（模型请求与额度查询共用）。
+
 余额接口的实现照搬 [one-proxy](https://github.com/) 的 `internal/service/balance.go`（端点、字段、百分比口径都一致），但**不依赖 one-proxy 运行**：插件自己发 HTTP 请求。
+
+## 主要能力
+
+- **Grok 授权登录**：设备码（RFC 8628）网页授权，SuperGrok / X Premium 订阅即可，不需要 xAI API Key；令牌本地加密存放、临近过期自动续期。
+- **Grok 额度查询**：显示套餐档位（如 SuperGrok）、周期配额（`WEEKLY` → 本周额度 / `MONTHLY` → 本月额度）的已用百分比、Grok Build / Grok Chat 等产品分项，以及重置倒计时。
+- **模型路由自动配置**：通过 DSH 官方配置通道自动补齐 `xai` 供应商（`apiKeyEnv: XAI_OAUTH_TOKEN` 等），Grok 模型即装即用，不需要手改 YAML。
+- **按供应商代理**：每家供应商可选「跟随默认 / 直连 / 走代理」，模型 API 与余额、登录查询统一按该路由走。
+- **其它供应商余额**：DeepSeek、OpenRouter、Ollama、Kimi、智谱、MiniMax、Command Code、New API 等十余种查询方式，详见[支持的查询方式](#支持的查询方式)。
 
 ## 它长什么样
 
@@ -51,7 +61,13 @@ pnpm add link:D:/workspace/dsh-balance
 
 ## xAI：登录、余额与免手工配置的模型路由
 
-- **登录**：Grok 卡片 →「登录 xAI」→ 复制用户码 →「打开授权页」在 xAI 官方页面批准。授权完成后卡片自动出数，模型选择器里的 **xAI (Grok)** 也立即可用。
+- **登录（网页授权）**：Grok 卡片 →「登录 xAI」→ 复制用户码 →「打开授权页」在 xAI 官方页面登录并批准。授权完成后卡片自动出数，模型选择器里的 **xAI (Grok)** 也立即可用；同一卡片上还有「退出登录」，退出后回到未授权状态，可重新走一遍。
+- **额度查询**：读取 Grok CLI 的计费接口（`cli-chat-proxy.grok.com/v1/billing?format=credits`、`/v1/settings`、`api.x.ai/v1/me`），卡片展示：
+  - 套餐档位（如 `SuperGrok`）；
+  - 周期配额：`WEEKLY` 显示「本周额度」、`MONTHLY` 显示「本月额度」，主数值是**已用百分比**，附重置倒计时；
+  - 产品分项：Grok Build、Grok 聊天等各自的使用百分比；
+  - 按需计费与预付余额（接口有就显示）。
+  卡片右上角小刷新只重查这一家；平台不披露百分比时会明说，而不是显示 0。API Key 形态没有公开的余额接口，因此这条查询只对 OAuth 登录态生效。
 - **令牌**：与 dsh-xai-oauth 共用 `$DSH_HOME/xai-oauth.json`（0600），所以**之前装过 dsh-xai-oauth 并登录过的用户无需重新授权**；把旧插件从 profile 的 `bundles` 里移除后重启即可（它占用的 1457 端口随之释放，本插件不再单开端口，全部走 `/api/dsh-balance-panel/xai/*` 同源路由）。令牌只在 Host 侧，浏览器只能看到登录态；退出登录有 CSRF 校验。
 - **自动续期**：距过期不足 5 分钟用 refresh token 续期，并重新写入 DSH 凭据 `XAI_OAUTH_TOKEN`，模型请求与余额查询都读最新值。
 - **自动模型路由**：插件通过 DSH 官方 `configEditor`（和「设置 → 模型」页同一条写入路径）确保 `llm-pi-ai` 里存在 xai 路由：`apiKeyEnv: XAI_OAUTH_TOKEN`、`api: openai-responses`、`baseURL: https://api.x.ai/v1`。字段齐了就不再写；你已有的 `models` 等自定义内容原样保留；没写 `models` 时使用宿主内置目录里的全部 Grok 模型。**不需要、也不应该再手工往 `cordis.patch.yml` 里补 xai 配置**（手工覆盖反而可能把插件合并的字段顶掉）。
