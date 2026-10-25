@@ -5,7 +5,7 @@ DSH（DeepSeek Harness）插件。侧边栏点「余额」，看各家模型供�
 ## 功能
 
 - **余额总览**：金额或配额进度条，带重置倒计时。支持 DeepSeek、Kimi、智谱、Ollama、OpenRouter 等，完整列表见下文。
-- **Grok（xAI 订阅）**：设备码网页授权，SuperGrok / X Premium 都能用，不需要 API Key。登录后显示套餐、周/月额度已用百分比、Grok Build 等分项，Grok 模型也会自动配好。
+- **Grok（xAI 订阅）**：设备码网页授权，SuperGrok / X Premium 都能用，不需要 API Key。登录后显示套餐、周/月额度已用百分比、Grok Build 等分项，把你在「设置 → 模型」里加好的 xAI 路由接到这份授权上（插件不替你新建供应商）。
 - **按供应商设代理**：每家可选跟随默认、直连、走代理。模型请求和余额、登录查询走同一条路由。
 - **界面入口**：侧边栏「余额」在右侧栏打开；「设置 → 余额」是完整列表；「设置 → 模型」的供应商卡片上选查询方式和代理（未保存的添加草稿里不显示这两项）。
 
@@ -26,9 +26,10 @@ pnpm add link:D:/workspace/dsh-balance   # 开发用 link:，分发用包名或 
 
 **Grok 登录和查额度**：
 
-1. Grok 卡片点「登录 xAI」。
-2. 复制用户码，点「打开授权页」，在 xAI 官方页面登录并批准。
-3. 回到面板，卡片显示套餐（如 SuperGrok）、本周或本月已用百分比、重置时间。模型选择器里的 xAI (Grok) 也能直接用了。
+1. 先在「设置 → 模型」里添加 xAI (Grok) 供应商或模型 —— 面板上出现 Grok 卡片靠的是这条配置，插件不会替你新建。
+2. Grok 卡片点「登录 xAI」。
+3. 复制用户码，点「打开授权页」，在 xAI 官方页面登录并批准。
+4. 回到面板，卡片显示套餐（如 SuperGrok）、本周或本月已用百分比、重置时间，那条 xAI 路由也接上了 OAuth 凭据，模型选择器里能直接选。
 
 令牌存在 `$DSH_HOME/xai-oauth.json`，快过期会自动续期，退出登录在同一张卡片上。之前装过 dsh-xai-oauth 的，登录态直接沿用，不用重新授权。
 
@@ -56,7 +57,7 @@ Grok 这条只对 OAuth 登录态有效，API Key 没有公开余额接口。
   config:
     cacheMs: 30000        # 余额结果缓存，毫秒
     timeoutMs: 10000      # 单次查询超时
-    xaiAutoProvider: true # 自动配置 xAI 模型路由
+    xaiAutoProvider: true # 给已配置的 xAI 路由补 baseURL / 登录凭据（不新建供应商）
     xaiPath: ''           # 令牌文件路径，默认 $DSH_HOME/xai-oauth.json
 ```
 

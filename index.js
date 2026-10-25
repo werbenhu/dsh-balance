@@ -34,7 +34,10 @@ const DEFAULTS = {
   vendors: {},
   /** 这些供应商不查询（仍然显示，只是不发请求）。 */
   disabled: [],
-  /** 自动把 xAI 模型路由写进 llm-pi-ai（走官方 configEditor，用户不用碰 YAML）。 */
+  /**
+   * 给「设置 → 模型」里已经配好的 xAI 路由补字段（baseURL / api / 登录凭据）。
+   * 只补不改名、不新建：没配 xAI 时这里什么都不写。
+   */
   xaiAutoProvider: true,
   /** xAI 令牌文件位置；空串 = $DSH_HOME/xai-oauth.json。 */
   xaiPath: '',
@@ -220,7 +223,7 @@ export async function resolveApiKey(ctx, apiKeyEnv) {
 }
 
 /**
- * xAI 模型路由的默认字段。
+ * 补齐已有 xAI 路由时写入的默认字段（只补缺失的，不改用户填过的）。
  *
  * 不写 models：llm-pi-ai 会用内置目录里 xai 的全部模型（grok-4.x 系列），
  * 新型号随宿主目录升级自动出现，插件不用跟着发版。
@@ -244,13 +247,20 @@ function withXaiDefaults(existing) {
 }
 
 /**
- * 确保 `llm-pi-ai` 里有可用的 xai 路由 —— 用户不需要手工编辑任何配置文件。
+ * 补齐「设置 → 模型」里已经存在的 xAI 路由 —— 不新建供应商。
  *
- * 走 DSH 官方的 configEditor（和「设置 → 模型」页同一条写入路径）：校验、
- * 落盘、Loader 热重载一次完成，插件重启后也不会重复写（字段齐了就直接返回）。
- * 用户已有的 models / 其它自定义字段原样保留。
+ * xAI 的模型路由只在用户自己添加模型时才该出现：没配 xAI 就原样返回，
+ * 配置里一个字都不写（这就是插件不该替用户决定的原因）。
+ *
+ * 找到 xai（或者 baseURL 指向 api.x.ai 的那条）之后，只补缺失的
+ * displayName / api / baseURL，并把登录后发布的 OAuth 凭据接上。
+ * 走 DSH 官方的 configEditor：校验、落盘、Loader 热重载一次完成，字段齐了
+ * 就直接返回，重启后也不会重复写。用户已有的 models / 其它自定义字段原样保留。
+ *
+ * `loggedIn` 为 false 且现有路由不是插件接管的（apiKeyEnv 不是 XAI_TOKEN_REF）时
+ * 一律不动配置：用户用自家 API Key 配的 xai 不该被 OAuth 覆盖。
  */
-export async function ensureXaiProvider(ctx) {
+export async function ensureXaiProvider(ctx, { loggedIn = false } = {}) {
   const editor = ctx.get('configEditor')
   if (editor === undefined || typeof editor.edit !== 'function' || typeof editor.entries !== 'function') {
     return { ok: false, reason: 'config-editor-unavailable' }
@@ -259,17 +269,38 @@ export async function ensureXaiProvider(ctx) {
     item?.options?.name === '@deepseek-ai/dsh-llm-pi-ai' || item?.options?.id === 'llm-pi-ai')
   if (entry === undefined) return { ok: false, reason: 'llm-pi-ai-not-mounted' }
 
-  const existing = entry.options?.config?.providers?.xai
-  const merged = withXaiDefaults(existing)
-  const before = existing ?? {}
-  const changed = Object.keys(merged).some((key) => merged[key] !== before[key])
+  const providers = entry.options?.config?.providers
+  if (providers === null || typeof providers !== 'object') {
+    return { ok: true, changed: false, reason: 'xai-not-configured' }
+  }
+
+  /** 用户可能把这条起成别的名字：地址能认出是 xAI 就算。 */
+  const target = (() => {
+    if (providers.xai !== null && typeof providers.xai === 'object') {
+      return { id: 'xai', value: providers.xai }
+    }
+    for (const [id, value] of Object.entries(providers)) {
+      if (value === null || typeof value !== 'object') continue
+      const baseUrl = value.baseURL ?? value.baseUrl ?? value.base_url
+      if (detectVendor(baseUrl) === 'grok') return { id, value }
+    }
+    return undefined
+  })()
+
+  if (target === undefined) return { ok: true, changed: false, reason: 'xai-not-configured' }
+  if (!loggedIn && target.value.apiKeyEnv !== XAI_TOKEN_REF) {
+    return { ok: true, changed: false, reason: 'xai-login-required' }
+  }
+
+  const merged = withXaiDefaults(target.value)
+  const changed = Object.keys(merged).some((key) => merged[key] !== target.value[key])
   if (!changed) return { ok: true, changed: false }
 
   await editor.edit(entry, (current) => ({
     ...current,
     providers: {
       ...(current?.providers ?? {}),
-      xai: withXaiDefaults(current?.providers?.xai),
+      [target.id]: withXaiDefaults(current?.providers?.[target.id]),
     },
   }))
   return { ok: true, changed: true }
@@ -340,27 +371,7 @@ export function apply(ctx, rawConfig) {
   /** 结果缓存：key 是 `${id}:${vendor}`，换查询方式后自然失效。 */
   const cache = new Map()
 
-  // —— xAI：OAuth 登录 + 自动续期 + 模型路由自动配置 ——
-
-  /** 登录/退出后余额立刻可刷新；登录成功顺手把模型路由补齐。 */
-  function ensureWithRetry(attempt = 0) {
-    if (!config.xaiAutoProvider) return
-    void (async () => {
-      try {
-        const outcome = await ensureXaiProvider(ctx)
-        if (outcome.ok) {
-          logger?.info?.(`[balance-panel] xAI 模型路由已就绪${outcome.changed ? '（已自动写入，无需手改配置）' : ''}`)
-          return
-        }
-      } catch (error) {
-        logger?.warn?.(`[balance-panel] xAI 路由自动配置失败：${String(error?.message ?? error)}`)
-      }
-      if (attempt < 4) {
-        const retry = setTimeout(() => ensureWithRetry(attempt + 1), 3000)
-        retry.unref?.()
-      }
-    })()
-  }
+  // —— xAI：OAuth 登录 + 自动续期 + 补齐模型列表里已配置的路由 ——
 
   const xai = new XaiOAuthService({
     ctx,
@@ -372,6 +383,40 @@ export function apply(ctx, rawConfig) {
     },
     onLogout: () => cache.clear(),
   })
+
+  /** 有没有 xAI 登录态：只读本地令牌，不发网络请求，也不触发续期。 */
+  const xaiLoggedIn = async () => {
+    try {
+      return (await xai.currentCredential()) !== undefined
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * 登录/退出后余额立刻可刷新；登录成功顺手把已配置的 xAI 路由接到 OAuth 凭据上。
+   * 没配 xAI 时 ensureXaiProvider 不改配置，这里也就不会反复重试。
+   */
+  function ensureWithRetry(attempt = 0) {
+    if (!config.xaiAutoProvider) return
+    void (async () => {
+      try {
+        const outcome = await ensureXaiProvider(ctx, { loggedIn: await xaiLoggedIn() })
+        if (outcome.ok) {
+          if (outcome.changed) {
+            logger?.info?.('[balance-panel] xAI 路由已按登录态补齐 baseURL / 凭据')
+          }
+          return
+        }
+      } catch (error) {
+        logger?.warn?.(`[balance-panel] xAI 路由补齐失败：${String(error?.message ?? error)}`)
+      }
+      if (attempt < 4) {
+        const retry = setTimeout(() => ensureWithRetry(attempt + 1), 3000)
+        retry.unref?.()
+      }
+    })()
+  }
 
   // —— 按供应商的代理分流：模型 API 与余额/OAuth 共用同一个全局路由 ——
 
@@ -484,11 +529,11 @@ export function apply(ctx, rawConfig) {
     await syncProxy().catch((error) => {
       logger?.warn?.(`[balance-panel] 代理路由同步失败：${String(error?.message ?? error)}`)
     })
-    // 原生「模型」对话框保存时可能清掉 xai 的 baseURL/apiKeyEnv：
-    // 每次打开面板都自检补回，避免余额卡消失、授权后模型仍无凭据
+    // 原生「模型」对话框保存时可能清掉已配置 xai 的 baseURL/apiKeyEnv：
+    // 登录态下每次打开面板顺手补回。没配 xAI 的话这里什么都不写。
     if (config.xaiAutoProvider) {
       try {
-        await ensureXaiProvider(ctx)
+        await ensureXaiProvider(ctx, { loggedIn: await xaiLoggedIn() })
       } catch (error) {
         logger?.warn?.(`[balance-panel] xAI 路由自检失败：${String(error?.message ?? error)}`)
       }

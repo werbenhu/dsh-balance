@@ -2,8 +2,9 @@
 #
 # Host 侧：读 DSH 已配置的模型供应商，按供应商选择的「余额查询方式」调各家
 # 官方接口，把结果聚合到 /api/dsh-balance-panel/summary。
-# 另含 xAI（Grok/X 订阅）OAuth 登录、自动续期与模型路由自动配置，
-# 走 /api/dsh-balance-panel/xai/* 同源路由，不单开端口，不用手改 profile 配置。
+# 另含 xAI（Grok/X 订阅）OAuth 登录与自动续期，并给「设置 → 模型」里已经
+# 配好的 xAI 路由补上凭据（不新建供应商），走 /api/dsh-balance-panel/xai/*
+# 同源路由，不单开端口，不用手改 profile 配置。
 # Client 侧：菜单栏入口 + 右侧抽屉，Grok 卡片可直接完成设备码登录。
 #
 # 所有配置项都有内置默认值，这里不写 config，以免覆盖你在 profile 的

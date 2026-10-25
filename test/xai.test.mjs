@@ -1,5 +1,5 @@
 /**
- * xAI 集成测试：OAuth 服务（离线假 fetch）+ 面板路由 + 模型路由自动配置。
+ * xAI 集成测试：OAuth 服务（离线假 fetch）+ 面板路由 + 已配置路由的字段补齐。
  *
  * 不碰真实 ~/.dsh：令牌文件都放在临时目录；不打真实网络。
  */
@@ -127,7 +127,7 @@ test('未登录时 fetchUsage 抛 XAI_NOT_LOGGED_IN', async (t) => {
   await assert.rejects(() => xai.fetchUsage(), (error) => error.code === 'XAI_NOT_LOGGED_IN')
 })
 
-test('ensureXaiProvider：自动补齐路由并保留其它供应商与 models，二次调用不再写', async () => {
+test('ensureXaiProvider：登录后补齐已有路由，保留其它供应商与 models，二次调用不再写', async () => {
   const entry = {
     options: {
       id: 'llm-pi-ai',
@@ -152,7 +152,7 @@ test('ensureXaiProvider：自动补齐路由并保留其它供应商与 models�
   }
   const ctx = { get: (name) => (name === 'configEditor' ? editor : undefined) }
 
-  const first = await ensureXaiProvider(ctx)
+  const first = await ensureXaiProvider(ctx, { loggedIn: true })
   assert.equal(first.ok, true)
   assert.equal(first.changed, true)
   const providers = edits[0].providers
@@ -162,10 +162,72 @@ test('ensureXaiProvider：自动补齐路由并保留其它供应商与 models�
   assert.equal(providers.xai.api, 'openai-responses')
   assert.equal(providers.xai.baseURL, 'https://api.x.ai/v1')
 
-  const second = await ensureXaiProvider(ctx)
+  const second = await ensureXaiProvider(ctx, { loggedIn: true })
   assert.equal(second.ok, true)
   assert.equal(second.changed, false)
   assert.equal(edits.length, 1)
+})
+
+test('ensureXaiProvider：没配 xAI 时不新建供应商', async () => {
+  const entry = {
+    options: {
+      id: 'llm-pi-ai',
+      name: '@deepseek-ai/dsh-llm-pi-ai',
+      config: { providers: { deepseek: { baseURL: 'https://api.deepseek.com' } } },
+    },
+  }
+  let writes = 0
+  const editor = {
+    entries: () => [entry],
+    configuration: () => [],
+    async edit() { writes += 1 },
+  }
+  const ctx = { get: (name) => (name === 'configEditor' ? editor : undefined) }
+
+  for (const loggedIn of [false, true]) {
+    const outcome = await ensureXaiProvider(ctx, { loggedIn })
+    assert.equal(outcome.ok, true)
+    assert.equal(outcome.changed, false)
+    assert.equal(outcome.reason, 'xai-not-configured')
+  }
+  assert.equal(writes, 0)
+  assert.deepEqual(Object.keys(entry.options.config.providers), ['deepseek'])
+})
+
+test('ensureXaiProvider：未登录不动用户自己配了 API Key 的 xai', async () => {
+  const entry = {
+    options: {
+      id: 'llm-pi-ai',
+      name: '@deepseek-ai/dsh-llm-pi-ai',
+      config: {
+        providers: { xai: { baseURL: 'https://api.x.ai/v1', apiKeyEnv: 'MY_XAI_KEY' } },
+      },
+    },
+  }
+  const writes = []
+  const editor = {
+    entries: () => [entry],
+    configuration: () => [],
+    async edit(target, change) {
+      entry.options.config = change(entry.options.config, {})
+      writes.push(entry.options.config)
+    },
+  }
+  const ctx = { get: (name) => (name === 'configEditor' ? editor : undefined) }
+
+  const outcome = await ensureXaiProvider(ctx)
+  assert.equal(outcome.ok, true)
+  assert.equal(outcome.changed, false)
+  assert.equal(outcome.reason, 'xai-login-required')
+  assert.equal(writes.length, 0)
+  assert.equal(entry.options.config.providers.xai.apiKeyEnv, 'MY_XAI_KEY')
+
+  // 登录之后才接管凭据
+  const afterLogin = await ensureXaiProvider(ctx, { loggedIn: true })
+  assert.equal(afterLogin.ok, true)
+  assert.equal(afterLogin.changed, true)
+  assert.equal(writes.length, 1)
+  assert.equal(entry.options.config.providers.xai.apiKeyEnv, XAI_TOKEN_REF)
 })
 
 // —— 面板路由级：OAuth 令牌直接喂给余额聚合，退出后卡片变成待登录 ——
