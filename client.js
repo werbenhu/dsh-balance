@@ -424,6 +424,9 @@ window.__ModuleLoader__.load({
           : h('span', { style: styles.modelHint }, t('xai.loginFailed', String(status.loginError))),
 
         waiting && code !== undefined ? h('span', { style: { ...styles.codeValue, fontSize: 14 } }, code) : null,
+        waiting && code !== undefined
+          ? h('span', { style: styles.modelHint }, t('xai.codeHint', String(Math.max(1, Math.round((loginState?.expiresInSeconds ?? 900) / 60)))))
+          : null,
         waiting
           ? h('button', {
             type: 'button',
@@ -862,7 +865,6 @@ window.__ModuleLoader__.load({
           'xai.cancel': '取消',
           'xai.codeHint': '在 xAI 官方页面登录并批准（用户码约 {0} 分钟内有效）',
           'xai.loginHint': '用 SuperGrok / X Premium 订阅登录，无需 API Key；登录后 Grok 模型与余额一起可用',
-          'xai.loggedIn': '已连接 xAI 订阅',
           'xai.authLabel': 'xAI 授权',
           'xai.accountLoggedIn': '已登录（余额页显示额度）',
           'xai.signInOnModels': '未登录 xAI：在「设置 → 模型」的 xAI 卡片里授权，这里才显示额度',
@@ -916,7 +918,6 @@ window.__ModuleLoader__.load({
           'xai.cancel': 'Cancel',
           'xai.codeHint': 'Approve on the official xAI page (code valid for about {0} minutes)',
           'xai.loginHint': 'Use a SuperGrok / X Premium subscription — no API key. Signing in enables Grok models and this balance card.',
-          'xai.loggedIn': 'xAI subscription connected',
           'xai.authLabel': 'xAI authorization',
           'xai.accountLoggedIn': 'Signed in (usage shows on the balance page)',
           'xai.signInOnModels': 'Not signed in — authorize in the xAI card under Settings → Models to see usage here',
