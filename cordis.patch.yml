@@ -5,7 +5,8 @@
 # 另含 xAI（Grok/X 订阅）OAuth 登录与自动续期，并给「设置 → 模型」里已经
 # 配好的 xAI 路由补上凭据（不新建供应商），走 /api/dsh-balance-panel/xai/*
 # 同源路由，不单开端口，不用手改 profile 配置。
-# Client 侧：菜单栏入口 + 右侧抽屉，Grok 卡片可直接完成设备码登录。
+# Client 侧：菜单栏入口 + 右侧抽屉只显示额度；设备码登录（含用户码、
+# 打开授权页、退出）挂在「设置 → 模型」的 xAI 卡片上。
 #
 # 所有配置项都有内置默认值，这里不写 config，以免覆盖你在 profile 的
 # cordis.patch.yml 里的设置（同 id 的 override 会替换整个 config）。

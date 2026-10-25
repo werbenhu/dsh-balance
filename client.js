@@ -172,14 +172,13 @@ window.__ModuleLoader__.load({
 
     /** 一张供应商卡片：拖拽手柄 + 状态点 + 名称 + 主数值 + 明细。 */
     function ProviderCard({
-      entry, compact, t, onRefresh, refreshing, xai,
+      entry, compact, t, onRefresh, refreshing,
       dragging, dragOver, onDragStart, onDragEnd, onDragOver, onDrop, onMove,
     }) {
       const result = entry.result ?? {}
       const failing = result.ok === false
       const needsLogin = result.needsLogin === true
       const idle = result.kind === 'none'
-      const isGrok = entry.vendor === 'grok'
       const details = Array.isArray(result.details) ? result.details.slice(0, compact ? 2 : 4) : []
 
       return h('div', {
@@ -245,7 +244,7 @@ window.__ModuleLoader__.load({
           ? h('div', { style: styles.hint }, t('hint.disabled'))
           : failing
             ? h('div', { style: needsLogin ? styles.hint : { ...styles.hint, color: TONE.bad } },
-              result.error ?? t('error.unknown'))
+              needsLogin ? t('xai.signInOnModels') : (result.error ?? t('error.unknown')))
             : null,
 
         !failing && !idle
@@ -262,8 +261,6 @@ window.__ModuleLoader__.load({
             item,
             t,
           }))),
-
-        isGrok ? h(XaiAuth, { xai, compact, t }) : null,
       )
     }
 
@@ -383,57 +380,82 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** Grok 卡片里的授权区：登录按钮 / 用户码 + 授权页 / 退出。 */
-    function XaiAuth({ xai, compact, t }) {
-      if (xai === undefined) return null
+    /**
+     * 「设置 → 模型」卡片上的 xAI 账号授权：登录 / 用户码 + 授权页 / 退出。
+     *
+     * 登录态是账号级的（一个 DSH 只存一份 xAI 令牌），所以放在添加或修改 xAI
+     * 模型这一步；余额页只负责把额度显示出来，不提供登录入口。
+     */
+    function XaiCardAuth({ t, providerId, provider }) {
+      const name = provider?.displayName ?? provider?.label ?? provider?.name
+      const looksXai = providerId === 'xai' || /xai|grok/i.test(String(name ?? ''))
+      const [vendor, setVendor] = useState(undefined)
+
+      // 路由名被改成别的（比如 mygrok）时，靠 Host 的地址识别兜底
+      useEffect(() => {
+        if (looksXai) return undefined
+        let alive = true
+        loadProviders().then((list) => {
+          if (!alive) return
+          const hit = list.find((item) => item.id === providerId)
+          if (hit !== undefined) setVendor(hit.vendor)
+        })
+        return () => {
+          alive = false
+        }
+      }, [providerId, looksXai])
+
+      const isXai = looksXai || vendor === 'grok'
+      const xai = useXai(isXai)
+      if (!isXai) return null
+
       const status = xai.status
       const loginState = status?.loginState
       const waiting = status?.loginPending === true || loginState?.status === 'pending'
       const connected = status?.loggedIn === true
+      const code = typeof loginState?.userCode === 'string' ? loginState.userCode : undefined
 
-      return h('div', { style: styles.authBlock },
-        xai.error === undefined ? null : h('div', { style: { ...styles.hint, color: TONE.bad } },
-          t('xai.authError', xai.error)),
+      return h('div', { style: styles.modelBlock },
+        h('span', { style: styles.modelLabel }, t('xai.authLabel')),
+
+        xai.error === undefined ? null
+          : h('span', { style: styles.modelHint }, t('xai.authError', xai.error)),
         status?.loginError === undefined || status?.loginError === null ? null
-          : h('div', { style: { ...styles.hint, color: TONE.bad } }, t('xai.loginFailed', status.loginError)),
+          : h('span', { style: styles.modelHint }, t('xai.loginFailed', String(status.loginError))),
 
-        waiting && typeof loginState?.userCode === 'string'
-          ? h('div', null,
-            h('div', { style: styles.codeRow },
-              h('span', { style: styles.codeValue }, loginState.userCode),
-              h('button', {
-                type: 'button',
-                style: styles.primaryButton,
-                onClick: () => window.open(loginState.verificationUri, 'dsh-xai-verification', 'noopener,noreferrer'),
-              }, t('xai.openAuth')),
-            ),
-            h('div', { style: styles.hint },
-              t('xai.codeHint', String(Math.max(1, Math.round((loginState.expiresInSeconds ?? 900) / 60))))),
-          )
+        waiting && code !== undefined ? h('span', { style: { ...styles.codeValue, fontSize: 14 } }, code) : null,
+        waiting
+          ? h('button', {
+            type: 'button',
+            style: styles.primaryButton,
+            onClick: () => window.open(String(loginState?.verificationUri ?? ''), 'dsh-xai-verification', 'noopener,noreferrer'),
+          }, t('xai.openAuth'))
+          : null,
+        waiting
+          ? h('button', { type: 'button', style: styles.button, onClick: () => { void xai.cancel() } }, t('xai.cancel'))
           : null,
 
-        h('div', { style: styles.authRow },
-          connected
-            ? h('span', { style: { ...styles.hint, color: TONE.ok } }, t('xai.loggedIn'))
+        connected
+          ? h('span', { style: styles.modelHint }, t('xai.accountLoggedIn'))
+          : waiting
+            ? h('span', { style: styles.modelHint }, t('xai.pending'))
             : h('button', {
               type: 'button',
               style: styles.primaryButton,
-              disabled: xai.busy || waiting,
-              onClick: () => { void xai.login() },
-            }, waiting ? t('xai.pending') : t('xai.login')),
-          waiting
-            ? h('button', { type: 'button', style: styles.button, onClick: () => { void xai.cancel() } }, t('xai.cancel'))
-            : null,
-          connected && !compact
-            ? h('button', {
-              type: 'button',
-              style: styles.button,
               disabled: xai.busy,
-              onClick: () => { void xai.logout() },
-            }, t('xai.logout'))
-            : null,
-        ),
-        connected || waiting ? null : h('div', { style: styles.hint }, t('xai.loginHint')),
+              onClick: () => { void xai.login() },
+            }, t('xai.login')),
+
+        connected
+          ? h('button', {
+            type: 'button',
+            style: styles.button,
+            disabled: xai.busy,
+            onClick: () => { void xai.logout() },
+          }, t('xai.logout'))
+          : null,
+
+        connected || waiting ? null : h('span', { style: styles.modelHint }, t('xai.loginHint')),
       )
     }
 
@@ -537,7 +559,6 @@ window.__ModuleLoader__.load({
           compact,
           t,
           refreshing: busy[entry.id] === true,
-          xai: entry.vendor === 'grok' ? xai : undefined,
           dragging: draggedId === entry.id,
           dragOver: dragOverId === entry.id && draggedId !== entry.id,
           onRefresh: () => refreshProvider(entry.id),
@@ -842,6 +863,9 @@ window.__ModuleLoader__.load({
           'xai.codeHint': '在 xAI 官方页面登录并批准（用户码约 {0} 分钟内有效）',
           'xai.loginHint': '用 SuperGrok / X Premium 订阅登录，无需 API Key；登录后 Grok 模型与余额一起可用',
           'xai.loggedIn': '已连接 xAI 订阅',
+          'xai.authLabel': 'xAI 授权',
+          'xai.accountLoggedIn': '已登录（余额页显示额度）',
+          'xai.signInOnModels': '未登录 xAI：在「设置 → 模型」的 xAI 卡片里授权，这里才显示额度',
           'xai.loginFailed': '登录失败：{0}',
           'xai.authError': 'xAI 状态读取失败：{0}',
           'proxy.label': '网络代理',
@@ -893,6 +917,9 @@ window.__ModuleLoader__.load({
           'xai.codeHint': 'Approve on the official xAI page (code valid for about {0} minutes)',
           'xai.loginHint': 'Use a SuperGrok / X Premium subscription — no API key. Signing in enables Grok models and this balance card.',
           'xai.loggedIn': 'xAI subscription connected',
+          'xai.authLabel': 'xAI authorization',
+          'xai.accountLoggedIn': 'Signed in (usage shows on the balance page)',
+          'xai.signInOnModels': 'Not signed in — authorize in the xAI card under Settings → Models to see usage here',
           'xai.loginFailed': 'Sign-in failed: {0}',
           'xai.authError': 'Could not read xAI status: {0}',
           'proxy.label': 'Proxy',
@@ -930,12 +957,13 @@ window.__ModuleLoader__.load({
             // keyed 槽的 owner props 里有 provider 视图；路由名在 provider.provider
             const providerId = props?.provider?.provider ?? props?.provider?.id
             if (typeof providerId !== 'string' || providerId === '') return null
-            // 「添加模型」的草稿卡：目录行还没保存任何配置，配余额方式/代理没有意义，
-            // 也会让确认区看起来像多出来的表单。已保存的供应商才显示这两项。
-            if (props?.configured === false) return null
+            // 余额查询方式 / 代理要有已保存的供应商才有意义；xAI 授权是账号级的，
+            // 所以「添加模型」的草稿卡上也直接给出登录入口。
+            const configured = props?.configured !== false
             return h('div', null,
-              h(VendorPicker, { t: props?.t ?? t, providerId, compact: true }),
-              h(ProxyPicker, { t: props?.t ?? t, providerId, compact: true }),
+              configured ? h(VendorPicker, { t: props?.t ?? t, providerId, compact: true }) : null,
+              configured ? h(ProxyPicker, { t: props?.t ?? t, providerId, compact: true }) : null,
+              h(XaiCardAuth, { t: props?.t ?? t, providerId, provider: props?.provider }),
             )
           }))
         } catch (error) {
@@ -1319,16 +1347,7 @@ window.__ModuleLoader__.load({
       },
       modelLabel: { fontSize: 12, opacity: 0.7, whiteSpace: 'nowrap' },
       modelHint: { fontSize: 11, opacity: 0.45 },
-      authBlock: {
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 6,
-        marginTop: 4,
-        paddingTop: 8,
-        borderTop: '1px dashed var(--dsw-alias-border-l1)',
-      },
       authRow: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 },
-      codeRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
       codeValue: {
         fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace',
         fontSize: 18,

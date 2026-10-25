@@ -6,7 +6,8 @@
  *   2. 各座位都注册到了，而且缺右侧栏服务时会安静退化，不抛错；
  *   3. 右侧栏可用时，tab 类型 / tab 身体在**加载期**就注册好，且入口只在
  *      「有会话在屏」时才拦截点击；
- *   4. 卡片能通过拖拽手柄重排，并把完整顺序交给 Host 保存。
+ *   4. 卡片能通过拖拽手柄重排，并把完整顺序交给 Host 保存；
+ *   5. xAI 的设备码登录挂在「设置 → 模型」的卡片上，余额卡只提示去哪里授权。
  */
 import assert from 'node:assert/strict'
 import test from 'node:test'
@@ -93,6 +94,10 @@ function loadClient() {
   let captured
 
   const fakeWindow = {
+    // 宿主浏览器里这些都在：登录态轮询用 setInterval，授权页用 open
+    setInterval: () => 0,
+    clearInterval: () => {},
+    open: () => null,
     __ModuleLoader__: {
       load(options) {
         captured = options
@@ -423,6 +428,83 @@ test('卡片展示与拖拽：长小数保留两位，放下后重排并保存�
 
     await settle()
     assert.deepEqual(writes, [{ order: ['second', 'third', 'first'] }])
+  } finally {
+    globalThis.fetch = originalFetch
+    pendingEffects.length = 0
+  }
+})
+
+test('xAI 授权在「设置 → 模型」：草稿卡也给出登录入口，余额卡只提示去授权', async () => {
+  const exported = loadClient()
+  const { ctx, seats } = makeCtx({ drawer: false })
+  exported.apply(ctx)
+
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const route = String(url)
+    if (route === '/api/dsh-balance-panel/xai/status') {
+      return new Response(JSON.stringify({ loggedIn: false, loginPending: false }), { status: 200 })
+    }
+    if (route === '/api/dsh-balance-panel/summary') {
+      return new Response(JSON.stringify({
+        providers: [{ id: 'xai', label: 'xAI (Grok)', vendor: 'grok', vendorSource: 'auto', result: { ok: false, needsLogin: true } }],
+      }), { status: 200 })
+    }
+    return new Response(JSON.stringify({}), { status: 200 })
+  }
+
+  const render = createHookRenderer()
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
+  const visit = (node, found = []) => {
+    if (Array.isArray(node)) {
+      for (const child of node) visit(child, found)
+      return found
+    }
+    if (node === null || typeof node !== 'object') return found
+    found.push(node)
+    return visit(node.children ?? [], found)
+  }
+  const textOf = (node) => {
+    if (Array.isArray(node)) return node.map(textOf).join('')
+    if (node === null || node === undefined || typeof node === 'boolean') return ''
+    if (typeof node === 'string' || typeof node === 'number') return String(node)
+    return textOf(node.children ?? [])
+  }
+  const buttons = (tree) => visit(tree).filter((node) => node.type === 'button')
+  const buttonLabels = (tree) => buttons(tree).map((node) => textOf(node.children))
+
+  try {
+    const cell = seats.find((seat) => seat.kind === 'register' && seat.spec.name === 'settings.models.provider-card').component
+    const draft = (providerId, displayName) => render(() => cell({
+      provider: { provider: providerId, displayName },
+      configured: false,
+      t: (key) => key,
+    }))
+
+    let tree = draft('xai', 'xAI (Grok)')
+    flushEffects()
+    await settle()
+    tree = draft('xai', 'xAI (Grok)')
+    assert.ok(textOf(tree).includes('xai.authLabel'), 'xAI 卡片上没有授权区')
+    assert.deepEqual(buttonLabels(tree), ['xai.login'], '未登录时应给出登录按钮（不加余额方式的草稿卡也一样）')
+
+    // 别的供应商不该冒出 xAI 授权
+    flushEffects()
+    await settle()
+    assert.equal(textOf(draft('deepseek', 'DeepSeek')), '')
+
+    // 余额卡：只提示去模型页授权，不再自带登录/退出
+    const registration = seats.find((seat) => seat.kind === 'register' && seat.spec.name === 'settings.section')
+    const renderSettings = () => render(() => registration.component({ t: (key) => key }))
+    let panel = renderSettings()
+    flushEffects()
+    await settle()
+    panel = renderSettings()
+    const card = visit(panel).find((node) => node.props?.['data-provider-id'] === 'xai')
+    assert.ok(card !== undefined, '没有渲染 Grok 卡')
+    assert.ok(textOf(card).includes('xai.signInOnModels'), '余额卡应指路到「设置 → 模型」')
+    assert.equal(textOf(card).includes('xai.login'), false, '余额卡不该再放登录按钮')
+    assert.equal(buttonLabels(card).includes('xai.logout'), false, '余额卡不该再放退出按钮')
   } finally {
     globalThis.fetch = originalFetch
     pendingEffects.length = 0
