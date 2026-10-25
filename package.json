@@ -1,6 +1,6 @@
 {
   "name": "dsh-balance-panel",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "description": "DeepSeek Harness 插件：为每个模型供应商选择余额查询方式，菜单栏入口 + 右侧抽屉查看各家套餐余额与配额。",
